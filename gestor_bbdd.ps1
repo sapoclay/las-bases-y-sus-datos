@@ -151,7 +151,7 @@ function BuscarConfigBD($basePath, $procName) {
     }
     elseif ($procName -match "mongod") {
         $candidatos = @(
-            (Join-Path $basePath "mongodb\mongod.cfg"),
+            (Join-Path $basePath "MongoDB\Server\8.2\bin\mongod.cfg"),
             (Join-Path $basePath "bin\mongod.cfg")
         )
         foreach ($c in $candidatos) {
@@ -589,16 +589,20 @@ function IniciarServidor($servicio,$activos){
 # Util para preparar el entorno de clase con un solo comando.
 function ModoPractica($tipo){
     switch($tipo){
-        1{
+		1 {
             Write-Host ""
-            Write-Host "Iniciando entorno MySQL + MongoDB"
-            Start-Service MySQL -ErrorAction SilentlyContinue
-            Start-Service MongoDB -ErrorAction SilentlyContinue
+            Write-Host "Iniciando entorno MySQL + MongoDB" -ForegroundColor Cyan
+            # Intentamos iniciar usando comodines por si el nombre varía por la versión
+            Start-Service "mysql*" -ErrorAction SilentlyContinue
+            Start-Service "MongoDB*" -ErrorAction SilentlyContinue
         }
-        2{
+        2 {
             Write-Host ""
-            Write-Host "Iniciando entorno PostgreSQL"
-            Start-Service postgresql* -ErrorAction SilentlyContinue
+            Write-Host "Iniciando entorno PostgreSQL" -ForegroundColor Cyan
+            Start-Service "postgresql*" -ErrorAction SilentlyContinue
+        }
+		Default {
+            Write-Host "Opción no válida" -ForegroundColor Red
         }
     }
     pause
@@ -619,7 +623,7 @@ function AyudaServicios{
     Write-Host "1 Abrir services.msc"
     Write-Host "2 Buscar el servidor de base de datos"
     Write-Host "3 Cambiar 'Tipo de inicio' a MANUAL"
-    Write-Host ""
+    Write-Host "-----------------------------------"
     Write-Host "Metodo comando administrador:"
     Write-Host ""
     Write-Host "sc config MySQL start= demand"
@@ -901,6 +905,65 @@ function DiagnosticoCompleto{
     pause
 }
 
+# El "motor de búsqueda" que evitará que el programa falle si no encuentra la ruta.
+function Buscar-Ejecutable($nombreArchivo) {
+    # 1. Intentar buscar en el PATH del sistema (lo más rápido)
+    $checkPath = Get-Command $nombreArchivo -ErrorAction SilentlyContinue
+    if ($checkPath) { return $checkPath.Source }
+
+    # 2. Definir raíces de búsqueda comunes
+    $raices = @(
+        "${env:ProgramFiles}", 
+        "${env:ProgramFiles(x86)}", 
+        "C:\xampp", 
+        "C:\tools" # Si se usa Chocolatey
+    )
+
+    # 3. Buscar el archivo con una profundidad controlada para no tardar demasiado
+    foreach ($raiz in $raices) {
+        if (Test-Path $raiz) {
+            # Buscamos el archivo. -Depth 4 es suficiente para llegar a los /bin de la mayoría de DBs
+            $hallado = Get-ChildItem -Path $raiz -Filter $nombreArchivo -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hallado) { return $hallado.FullName }
+        }
+    }
+
+    return $null
+}
+
+# Función para abrir la terminal de la base de datos encontrada
+function AbrirTerminalDB($item) {
+    $nombre = $item.Nombre.ToLower()
+    $exe = $null
+    $args = ""
+
+    if ($nombre -like "*mysql*" -or $nombre -like "*maria*") {
+        $exe = Buscar-Ejecutable "mysql.exe"
+        $args = "-u root -p"
+    } 
+    elseif ($nombre -like "*mongo*") {
+        # Buscamos primero el shell moderno
+        $exe = Buscar-Ejecutable "mongosh.exe"
+        
+        if (-not $exe) {
+            # Si no está, avisamos al usuario con la solución
+            Write-Host "--- ERROR DE COMPONENTES ---" -ForegroundColor Red
+            Write-Host "Se detectó el servidor MongoDB, pero falta el cliente 'mongosh.exe'." -ForegroundColor Yellow
+            Write-Host "Debes descargarlo de: https://www.mongodb.com/try/download/shell" -ForegroundColor Cyan
+            Write-Host "y colocarlo en la carpeta bin de MongoDB."
+            return
+        }
+    } 
+    elseif ($nombre -like "*postgres*") {
+        $exe = Buscar-Ejecutable "psql.exe"
+        $args = "-U postgres"
+    }
+
+    if ($exe) {
+        Write-Host "Lanzando terminal: $exe" -ForegroundColor Cyan
+        Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", "& '$exe' $args"
+    }
+}
 # ---------------- Menú principal ----------------
 
 # Muestra el menu principal del programa con la lista unificada de servidores.
@@ -992,6 +1055,7 @@ function MostrarMenu{
     Write-Host "7 Ayuda configurar servicios"
     Write-Host "8 Diagnostico completo del equipo"
     Write-Host "9 Resetear password root MySQL/MariaDB"
+	Write-Host "10 Abrir TERMINAL de un servidor de DB"
     Write-Host "0 Salir"
 
     return @{ Lista = $listaUnificada; Activos = $activos }
@@ -1084,6 +1148,24 @@ function MostrarMenu{
         "7"{AyudaServicios}
         "8"{DiagnosticoCompleto}
         "9"{ResetearPasswordRoot}
+		"10"{
+            if ($lista.Count -eq 0) { 
+                Write-Host "No hay bases de datos detectadas." -ForegroundColor Yellow
+                pause; continue 
+            }
+            $n = Read-Host "Indica el numero de la base de datos ACTIVA para intentar abrir su terminal"
+            if ($n -match '^\d+$' -and [int]$n -ge 1 -and [int]$n -le $lista.Count) {
+                $item = $lista[[int]$n-1]
+                if ($item.Estado -ne "Running") {
+                    Write-Host "¡Error! La base de datos debe estar ACTIVA." -ForegroundColor Red
+                } else {
+                    AbrirTerminalDB $item
+                }
+            } else {
+                Write-Host "Opción inválida." -ForegroundColor Red
+            }
+            pause
+        }
         "0"{break menuLoop}
         default { Write-Host "Opcion no valida." -ForegroundColor Red; Start-Sleep 1 }
     }
